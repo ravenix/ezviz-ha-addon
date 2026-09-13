@@ -14,12 +14,18 @@ import urllib.parse
 # dejado de autenticar. Los repetidos se agrupan en un resumen periódico.
 SUMMARY_INTERVAL_SECONDS = 60
 
+# Segundos que puede tardar una sola lectura o escritura del socket antes de dar
+# al cliente por muerto y liberar su hilo.
+CONNECTION_TIMEOUT = 30
+
 
 class CORSRequestHandler(http.server.SimpleHTTPRequestHandler):
     """HTTP handler with CORS headers for cross-origin HLS playback"""
 
     _suppressed = 0
     _last_summary = 0.0
+    # Se aplica a cada lectura y escritura del socket, no a la descarga entera.
+    timeout = CONNECTION_TIMEOUT
 
     def translate_path(self, path):
         """Sanitize path - strip trailing whitespace/control chars like \\r"""
@@ -37,6 +43,9 @@ class CORSRequestHandler(http.server.SimpleHTTPRequestHandler):
             pass
         except ConnectionResetError:
             # Client reset connection - also harmless
+            pass
+        except TimeoutError:
+            # Cliente que abre la conexion y deja de leer: su hilo muere solo.
             pass
 
     def end_headers(self):
@@ -98,11 +107,23 @@ class CORSRequestHandler(http.server.SimpleHTTPRequestHandler):
         self._log(format % args)
 
 
+class ThreadedHTTPServer(socketserver.ThreadingTCPServer):
+    """Un hilo por peticion, y que los hilos no impidan parar el add-on."""
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def run_server(port=8080, directory='.'):
     """Start the HTTP server"""
     os.chdir(directory)
 
-    with socketserver.TCPServer(("", port), CORSRequestHandler) as httpd:
+    # ThreadingTCPServer y no TCPServer: el servidor de un solo hilo atiende una
+    # peticion cada vez, asi que un unico cliente que abra la conexion y deje de
+    # leer bloquea a todos los demas. El 13 de septiembre de 2026 eso dejo 18 h sin
+    # grabar: con un reproductor colgado en el playlist, el detector de movimiento
+    # no pudo abrir el stream y el add-on siguio marcado como "started".
+    with ThreadedHTTPServer(("", port), CORSRequestHandler) as httpd:
         print(f"CORS HTTP server running on port {port}", file=sys.stderr)
         httpd.serve_forever()
 
